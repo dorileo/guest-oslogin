@@ -17,7 +17,6 @@
 
 #include <compat.h>
 #include <ctype.h>
-#include <security/pam_modules.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syslog.h>
@@ -45,7 +44,7 @@ extern "C" {
    ((u_int32_t)(((const u_char *)(p))[2]) << 8) |       \
    (u_int32_t)(((const u_char *)(p))[3]))
 
-int sshca_get_byoid_fingerprint(pam_handle_t* pamh, const char *blob, char **fingerprint);
+int sshca_get_byoid_fingerprint(const char *log_prefix, const char *blob, char **fingerprint);
 
 #ifdef __cplusplus
 }

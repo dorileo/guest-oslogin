@@ -18,7 +18,7 @@ LDLIBS = -lcurl -ljson-c -lpthread
 all: test_runner new_test_runner non_network_tests
 
 clean :
-	rm -f test_runner new_test_runner test_detail.xml *.o
+	rm -f sshca_runner test_runner new_test_runner test_detail.xml *.o
 
 gtest-all.o: $(GTEST_DIR)/src/gtest-all.cc
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c $^
@@ -26,7 +26,10 @@ gtest-all.o: $(GTEST_DIR)/src/gtest-all.cc
 test_runner: oslogin_utils_test.o $(TOPDIR)/src/oslogin_utils.o gtest-all.o
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $^ -o $@ $(LDLIBS)
 
-sshca_runner: oslogin_sshca_test.o gtest-all.o $(TOPDIR)/src/pam/oslogin_sshca.o
+oslogin_sshca.o: $(TOPDIR)/src/oslogin_sshca.cc
+	$(CXX) -DDISABLE_SYSLOG=1 $(CXXFLAGS) $(CPPFLAGS) -c $^
+
+sshca_runner: oslogin_sshca_test.o gtest-all.o oslogin_sshca.o
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $^ -o $@ $(LDLIBS) -lpam
 
 sshca_tests: sshca_runner

@@ -1,4 +1,4 @@
-// Copyright 2017 Google Inc. All Rights Reserved.
+// Copyright 2023 Google Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #include <pwd.h>
 #include <stdint.h>
 #include <syslog.h>
+#include <string.h>
 
 #include <string>
 #include <vector>
@@ -42,6 +43,68 @@
   do {                                                                         \
   } while (0)
 #endif /* DEBUG */
+
+#ifndef DISABLE_SYSLOG
+#ifndef SYSLOG_OPEN
+#define SYSLOG_OPEN(ident)                              \
+  do {                                                  \
+    openlog(ident, LOG_PID|LOG_PERROR, LOG_DAEMON);     \
+  }while(0)
+#endif
+
+#ifndef SYSLOG_CLOSE
+#define SYSLOG_CLOSE()                                  \
+  do {                                                  \
+    closelog();                                         \
+  }while(0)
+#endif
+
+#ifndef SYSLOG_ERR
+#define SYSLOG_ERR(prefix, fmt, ...)                                    \
+  do {                                                                  \
+    size_t fmt_size = strlen(prefix) + strlen(fmt) + 3;                 \
+    char *new_fmt = (char *)alloca(fmt_size);                           \
+    snprintf(new_fmt, fmt_size, "%s: %s", prefix, fmt);                 \
+    syslog(LOG_ERR, new_fmt, ##__VA_ARGS__);                            \
+  }while(0)
+#endif
+
+#ifndef SSHD_SYSLOG_OPEN
+#define SSHD_SYSLOG_OPEN()                      \
+  SYSLOG_OPEN("sshd")
+#endif
+
+#ifndef SSHD_SYSLOG_CLOSE
+#define SSHD_SYSLOG_CLOSE()                     \
+  SYSLOG_CLOSE()
+#endif
+
+#ifndef SSHD_SYSLOG_ERR
+#define SSHD_SYSLOG_ERR(prefix, fmt, ...)       \
+  SYSLOG_ERR(prefix, fmt, ##__VA_ARGS__)
+#endif
+
+#else /* DISABLE_SYSLOG  */
+
+#ifndef SSHD_SYSLOG_OPEN
+#define SSHD_SYSLOG_OPEN()                      \
+  do {                                          \
+  } while (0)
+#endif
+
+#ifndef SSHD_SYSLOG_CLOSE
+#define SSHD_SYSLOG_CLOSE()                     \
+  do {                                          \
+  } while (0)
+#endif
+
+#ifndef SSHD_SYSLOG_ERR
+#define SSHD_SYSLOG_ERR(prefix, fmt, ...)       \
+  do {                                          \
+  } while (0)
+#endif
+
+#endif /* DISABLE_SYSLOG */
 
 using std::string;
 using std::vector;
@@ -175,6 +238,13 @@ class MutexLock {
   MutexLock(const MutexLock&);
 };
 
+struct AuthOptions {
+  const char *log_prefix;
+  bool security_key;
+  char *fingerprint;
+  size_t fp_len;
+};
+
 // Callback invoked when Curl completes a request.
 size_t OnCurlWrite(void* buf, size_t size, size_t nmemb, void* userp);
 
@@ -275,5 +345,9 @@ bool ContinueSession(bool alt, const string& email, const string& user_token,
                      string* response);
 
 // Returns user information from the metadata server.
-bool GetUser(const string& username, string* response);
+bool GetUser(const string& username, string* response, struct AuthOptions *opts);
+
+// Perform user authorization logic & create users files and google sudoers, returns true if successful,
+// and false otherwise.
+bool AuthorizeUser(const char *user_name, struct AuthOptions opts, string *user_response);
 }  // namespace oslogin_utils

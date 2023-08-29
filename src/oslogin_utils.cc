@@ -1,4 +1,4 @@
-// Copyright 2019 Google Inc. All Rights Reserved.
+// Copyright 2023 Google Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,8 +21,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <json_object.h>
@@ -47,6 +50,9 @@ const int kMaxRetries = 1;
 
 // Regex for validating user names.
 const char kUserNameRegex[] = "^[a-zA-Z0-9._][a-zA-Z0-9._-]{0,31}$";
+
+static const char kUsersDir[] = "/var/google-users.d/";
+static const char kSudoersDir[] = "/var/google-sudoers.d/";
 
 namespace oslogin_utils {
 
@@ -942,7 +948,7 @@ cleanup:
 
 bool GetGroupsForUser(string username, std::vector<Group>* groups, int* errnop) {
   string response;
-  if (!(GetUser(username, &response))) {
+  if (!(GetUser(username, &response, NULL))) {
     DEBUG("GetGroupsForUser: !GetUser\n");
     *errnop = ENOENT;
     return false;
@@ -1084,9 +1090,13 @@ bool GetUsersForGroup(string groupname, std::vector<string>* users, int* errnop)
   return true;
 }
 
-bool GetUser(const string& username, string* response) {
+bool GetUser(const string& username, string* response, struct AuthOptions *opts) {
   std::stringstream url;
   url << kMetadataServerUrl << "users?username=" << UrlEncode(username);
+
+  if (opts != NULL && opts->security_key) {
+    url << "&view=securityKey";
+  }
 
   long http_code = 0;
   if (!HttpGet(url.str(), response, &http_code) || response->empty() ||
@@ -1170,4 +1180,129 @@ bool ContinueSession(bool alt, const string& email, const string& user_token, co
 
   return ret;
 }
+
+bool ApplyPolicy(const char *user_name, string email, const char *policy, struct AuthOptions opts) {
+  std::stringstream url;
+  url << kMetadataServerUrl << "authorize?email=" << UrlEncode(email) << "&policy=" << policy;
+
+  // Don't try to add fingerprint parameter to policy call if we don't have it.
+  if (opts.fp_len > 0) {
+    url << "&fingerprint=" << opts.fingerprint;
+  }
+
+  string response;
+  long http_code = 0;
+  // Invalid user, just leave from here - the principal will not be allowed/authorized.
+  if (!HttpGet(url.str(), &response, &http_code)) {
+    SSHD_SYSLOG_ERR(opts.log_prefix, "Failed to validate organization user %s has login permission.", user_name);
+    return false;
+  }
+
+  if (http_code != 200) {
+    SSHD_SYSLOG_ERR(opts.log_prefix, "Failed to validate organization user %s has login permission, "
+                    "got HTTP response code: %lu", user_name, http_code);
+    return false;
+  }
+
+  if (!ParseJsonToSuccess(response)) {
+    SSHD_SYSLOG_ERR(opts.log_prefix, "Organization user %s does not have login permission.", user_name);
+    return false;
+  }
+
+  return true;
+}
+
+bool CreateGoogleUserFile(string users_filename) {
+  std::ofstream users_file;
+  users_file.open(users_filename.c_str());
+
+  // OS Login directories are created by another product, guest-agent.
+  // We should be sure a file is opened for writing.
+  if (users_file.is_open()) {
+    // this is only for creating an empty file
+    users_file.close();
+
+    chown(users_filename.c_str(), 0, 0);
+    chmod(users_filename.c_str(), S_IRUSR | S_IWUSR | S_IRGRP);
+    return true;
+  }
+
+  return false;
+}
+
+bool CreateGoogleSudoersFile(string sudoers_filename, const char *user_name) {
+  std::ofstream sudoers_file;
+  sudoers_file.open(sudoers_filename.c_str());
+
+  // OS Login directories are created by another product, guest-agent.
+  // We should be sure a file is opened for writing.
+  if (sudoers_file.is_open()) {
+    sudoers_file << user_name << " ALL=(ALL) NOPASSWD: ALL\n";
+    sudoers_file.close();
+
+    chown(sudoers_filename.c_str(), 0, 0);
+    chmod(sudoers_filename.c_str(), S_IRUSR | S_IRGRP);
+    return true;
+  }
+
+  return false;
+}
+
+bool AuthorizeUser(const char *user_name, struct AuthOptions opts, string *user_response) {
+  bool users_file_exists, sudoers_exists;
+  string email, users_filename, sudoers_filename;
+  struct stat sudoers_buffer, buffer;
+
+  sudoers_buffer = buffer = { 0 };
+  users_file_exists = sudoers_exists = false;
+
+  if (!ValidateUserName(user_name)) {
+    return false;
+  }
+
+  // Call MDS "users?username=" endpoint.
+  if (!GetUser(user_name, user_response, &opts)) {
+    return false;
+  }
+
+  if (!ParseJsonToEmail(*user_response, &email) || email.empty()) {
+    return false;
+  }
+
+  users_filename = kUsersDir;
+  users_filename.append(user_name);
+  users_file_exists = !stat(users_filename.c_str(), &buffer);
+
+  // Couldn't apply "login" policy for the loggin in user, log it and deny.
+  if (!ApplyPolicy(user_name, email, "login", opts)) {
+    SSHD_SYSLOG_ERR(opts.log_prefix, "Could not grant access to organization user: %s.", user_name);
+    if (users_file_exists) {
+      remove(users_filename.c_str());
+    }
+    return false;
+  }
+
+  // If we can't create users file we can't grant access, log it and deny.
+  if (!users_file_exists && CreateGoogleUserFile(users_filename)) {
+    SSHD_SYSLOG_ERR(opts.log_prefix, "Failed to create user's file.");
+    return false;
+  }
+
+  sudoers_filename = kSudoersDir;
+  sudoers_filename.append(user_name);
+  sudoers_exists = !stat(sudoers_filename.c_str(), &sudoers_buffer);
+
+  if (ApplyPolicy(user_name, email, "adminLogin", opts)) {
+    // Best effor creating sudoers file, if we fail log it and grant access.
+    if (!sudoers_exists && !CreateGoogleSudoersFile(sudoers_filename, user_name)) {
+      SSHD_SYSLOG_ERR(opts.log_prefix, "Could not grant sudo permissions to organization user %s."
+                      " Sudoers file %s is not writable.", user_name, sudoers_filename.c_str());
+    }
+  } else {
+    remove(sudoers_filename.c_str());
+  }
+
+  return true;
+}
+
 }  // namespace oslogin_utils
